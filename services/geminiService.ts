@@ -1,24 +1,44 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import type { GenerateContentResponse } from "@google/genai";
-
-// FIX: Per @google/genai guidelines, initialize the client once with API_KEY from environment variables.
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-
+import { getNextKey, markKeyAsExhausted, getKeys } from './apiKeyManager';
 
 /**
- * A higher-order function that wraps API calls with error handling logic.
- * @param apiCall A function that performs an API call.
+ * A higher-order function that wraps API calls with error handling and retry logic for API keys.
+ * @param apiCall A function that performs an API call, receiving an initialized AI client.
  * @returns The result of the apiCall.
- * @throws An error with a user-friendly message if the API call fails.
+ * @throws An error with a user-friendly message if the API call fails after all retries.
  */
-async function withErrorHandling<T>(apiCall: () => Promise<T>): Promise<T> {
+async function withErrorHandling<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
+  const totalKeys = getKeys().length;
+  if (totalKeys === 0) {
+    throw new Error("No API keys set. Please add a key in the API Key Manager.");
+  }
+
+  // We will try each key at most once in a rotation.
+  for (let i = 0; i < totalKeys; i++) {
+    let key: string | null = null;
     try {
-        return await apiCall();
+      key = getNextKey(); // This function throws if all keys are exhausted/on cooldown.
+      const ai = new GoogleGenAI({ apiKey: key });
+      return await apiCall(ai); // If successful, we return and exit.
     } catch (error) {
-        // Propagate a user-friendly error to the UI.
-        handleError(error);
+      if (key && error instanceof Error) {
+        const isQuotaError = error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('quota');
+        if (isQuotaError) {
+          markKeyAsExhausted(key);
+          // Loop will continue to try the next available key.
+          continue;
+        }
+      }
+      // For any other error (including no keys available), we don't retry. We just handle and throw.
+      handleError(error);
     }
+  }
+  
+  // If the loop completes, it means every key we tried resulted in a quota error.
+  throw new Error("All available API keys have exceeded their quota. Please wait a minute before trying again.");
 }
+
 
 /**
  * Parses known API errors and returns a user-friendly message.
@@ -33,9 +53,9 @@ const handleError = (error: unknown): never => {
     if (error instanceof Error) {
         const message = error.message;
         if (message.includes('API key not valid') || message.includes('API_KEY')) {
-            finalMessage = "The Gemini API key is invalid. Please check your environment configuration.";
-        } else if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.includes('quota')) {
-            finalMessage = "The Gemini API key has exceeded its quota. Please wait a moment before trying again.";
+            finalMessage = "An API key is invalid. Please check your keys in the API Key Manager.";
+        } else if (message.includes('quota')) {
+            finalMessage = "An API key has exceeded its quota. The app is attempting to switch to another key.";
         } else {
              finalMessage = `An unexpected error occurred: ${message}`;
         }
@@ -57,7 +77,7 @@ interface ImagePart {
 export const generateCharacterDefinition = async (
   characterImage: ImagePart
 ): Promise<string> => {
-    return withErrorHandling(async () => {
+    return withErrorHandling(async (ai: GoogleGenAI) => {
         const prompt = "Look at the attached image and write one single short paragraph (max 35 words). Give only physical, repeatable traits for a character reference: approx age, face shape, skin tone, eye color/shape, nose shape, lips, eyebrow shape, hair color/length/style/hairline, facial hair (if any), visible wrinkles/scars, overall body build. Do NOT mention clothing, pose, expression, background, or accessories. If a detail is unclear, write ‘not visible’. Use very simple English and separate traits with commas.";
 
         const imagePart = {
@@ -85,7 +105,7 @@ export const editImageWithPrompt = async (
   characterImages: ImagePart[] = [],
   isMaskingEdit: boolean = false,
 ): Promise<{ newBase64: string; newMimeType: string }> => {
-    return withErrorHandling(async () => {
+    return withErrorHandling(async (ai: GoogleGenAI) => {
         const imageEditModel = 'gemini-2.5-flash-image-preview';
         const parts: any[] = [];
         let finalPrompt = prompt;
@@ -150,7 +170,7 @@ Now, generate the final, edited image by following all rules precisely.`;
 export const generateImageWithPrompt = async (
   prompt: string
 ): Promise<{ newBase64: string; newMimeType: string }> => {
-    return withErrorHandling(async () => {
+    return withErrorHandling(async (ai: GoogleGenAI) => {
         const finalPrompt = `Generate a photo, hyper-realistic cinematic still. The scene must feel like a dramatic, captured moment from a video, NOT a posed photograph. Characters must have exaggerated, theatrical expressions that immediately grab audience attention. The user's creative request is: "${prompt}", In 16:9 aspect ratio.`;
 
         const response = await ai.models.generateImages({
@@ -211,7 +231,7 @@ export const generateTextOverlaySuggestions = async (
   image: ImagePart
 ): Promise<string[]> => {
   try {
-    return await withErrorHandling(async () => {
+    return await withErrorHandling(async (ai: GoogleGenAI) => {
         const systemInstruction = "You are an expert YouTube thumbnail designer and content strategist. Your goal is to create highly engaging, clickbaity text overlays that maximize click-through rate, inspired by top YouTubers.";
         const userPrompt = `Analyze the provided thumbnail image. Generate 5 distinct suggestions for text overlays. Each suggestion must be a complete, detailed prompt for an AI image editor. Each prompt must specify:
 1.  The exact text to add, in quotes. The text should be short, dramatic, and in all caps (e.g., 'SHE LOST EVERYTHING!', '"YOU'RE DONE, KAREN"').
@@ -250,7 +270,7 @@ export const generateInitialTextSuggestions = async (
   sceneDescription: string
 ): Promise<string[]> => {
   try {
-    return await withErrorHandling(async () => {
+    return await withErrorHandling(async (ai: GoogleGenAI) => {
         const systemInstruction = "You are an expert YouTube thumbnail designer. Based on the user's scene description, your goal is to generate 5 highly engaging, clickbaity text overlay suggestions to maximize click-through rate.";
         const userPrompt = `Based on the following scene description, generate 5 distinct suggestions for a text overlay to be included in the final image. Each suggestion must be a complete, detailed instruction for an AI.
 Scene: "${sceneDescription}"

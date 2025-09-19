@@ -9,8 +9,10 @@ import Spinner from './components/Spinner';
 import NextSceneGenerator from './components/NextSceneGenerator';
 import MaskingCanvas from './components/MaskingCanvas';
 import MaskingToolbar from './components/MaskingToolbar';
+import ApiKeyManager from './components/ApiKeyManager';
 import { ImageVersion, Character, ImageSet } from './types';
 import { editImageWithPrompt, generateImageWithPrompt, generateCharacterDefinition, generateTextOverlaySuggestions } from './services/geminiService';
+import { getKeys, addKey, deleteKey } from './services/apiKeyManager';
 
 const initialCharactersState: Character[] = [
   { id: 'char1', name: 'Character 1', roleName: undefined, base64: null, mimeType: null, definition: null, isLoading: false, isAnalyzed: false },
@@ -32,6 +34,10 @@ const App: React.FC = () => {
   const [characters, setCharacters] = useState<Character[]>(initialCharactersState);
   const [showNewVersionGenerator, setShowNewVersionGenerator] = useState(false);
   
+  // API Key Manager State
+  const [isApiKeyManagerOpen, setIsApiKeyManagerOpen] = useState(false);
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
+
   // Masking state
   const [isMasking, setIsMasking] = useState(false);
   const [compositeImage, setCompositeImage] = useState<string | null>(null); // For the new visual instruction fusion method
@@ -45,6 +51,10 @@ const App: React.FC = () => {
 
 
   const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setApiKeys(getKeys());
+  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -77,6 +87,16 @@ const App: React.FC = () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [isMasking]);
+
+  const handleAddKey = (key: string) => {
+    addKey(key);
+    setApiKeys(getKeys());
+  };
+
+  const handleDeleteKey = (key: string) => {
+    deleteKey(key);
+    setApiKeys(getKeys());
+  };
 
   const handleGenerateSuggestions = useCallback(async (image: ImageVersion | null) => {
     if (!image) {
@@ -427,6 +447,14 @@ const App: React.FC = () => {
         onMenuToggle={() => setIsMenuOpen(!isMenuOpen)} 
         onNewThumbnail={handleNewThumbnail}
         showNewButton={!!activeImage}
+        onOpenApiKeyManager={() => setIsApiKeyManagerOpen(true)}
+      />
+      <ApiKeyManager
+        isOpen={isApiKeyManagerOpen}
+        onClose={() => setIsApiKeyManagerOpen(false)}
+        keys={apiKeys}
+        onAddKey={handleAddKey}
+        onDeleteKey={handleDeleteKey}
       />
       <main className="flex-grow pt-20 flex">
         <div className="flex-1 flex flex-col items-center px-4 overflow-y-auto pb-8">
