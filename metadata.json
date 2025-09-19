@@ -1,0 +1,5 @@
+{
+  "name": "Thumbnail AI Editor",
+  "description": "Upload and edit YouTube thumbnails using the Gemini 'Nano-Banana' image editing model. Create and manage different versions of your thumbnail with AI-powered prompts.",
+  "requestFramePermissions": []
+}
