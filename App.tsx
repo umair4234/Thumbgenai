@@ -40,7 +40,8 @@ const App: React.FC = () => {
 
   // Masking state
   const [isMasking, setIsMasking] = useState(false);
-  const [compositeImage, setCompositeImage] = useState<string | null>(null); // For the new visual instruction fusion method
+  const [compositeImage, setCompositeImage] = useState<string | null>(null); // For user display
+  const [maskImage, setMaskImage] = useState<string | null>(null); // For sending to the API
   const [brushSize, setBrushSize] = useState(40);
   const [undoTrigger, setUndoTrigger] = useState(0);
   const [redoTrigger, setRedoTrigger] = useState(0);
@@ -205,6 +206,7 @@ const App: React.FC = () => {
     setShowNewVersionGenerator(false);
     setIsMasking(false);
     setCompositeImage(null);
+    setMaskImage(null);
     setRegionPrompts([]);
     setTextSuggestions([]);
   }, []);
@@ -228,6 +230,7 @@ const App: React.FC = () => {
         if (prev) {
             setRegionPrompts([]);
             setCompositeImage(null);
+            setMaskImage(null);
         }
         return !prev;
     });
@@ -240,6 +243,7 @@ const App: React.FC = () => {
 
     let finalPrompt: string;
     let imageToSend = currentVersion;
+    let finalMaskImage: { base64: string, mimeType: string } | null = null;
     let characterImages: { base64: string; mimeType: string; }[] = [];
 
     if (isMasking) {
@@ -248,11 +252,13 @@ const App: React.FC = () => {
         setError("Please enter a description for at least one masked region.");
         return;
       }
-      if (!compositeImage) {
+      if (!maskImage) {
         setError("Masking is enabled, but nothing has been drawn. Please draw on the image or disable masking.");
         return;
       }
-      imageToSend = { ...currentVersion, base64: compositeImage, mimeType: 'image/png' };
+      // For masking, we send the ORIGINAL image and the MASK image.
+      imageToSend = currentVersion;
+      finalMaskImage = { base64: maskImage, mimeType: 'image/png' };
       finalPrompt = validRegionPrompts
         .map(p => `- **Region ${p.id}:** ${p.prompt.trim()}`)
         .join('\n');
@@ -297,7 +303,8 @@ const App: React.FC = () => {
         { base64: imageToSend.base64, mimeType: imageToSend.mimeType },
         submissionPrompt,
         characterImages,
-        isMasking
+        isMasking,
+        finalMaskImage
       );
 
       const newVersion: ImageVersion = { id: crypto.randomUUID(), base64: newBase64, mimeType: newMimeType };
@@ -315,6 +322,7 @@ const App: React.FC = () => {
       setRegionPrompts([]);
       setIsMasking(false); 
       setCompositeImage(null);
+      setMaskImage(null);
       setTextSuggestions([]);
     } catch (e: any)
     {
@@ -434,6 +442,7 @@ const App: React.FC = () => {
     setShowNewVersionGenerator(false);
     setIsMasking(false);
     setCompositeImage(null);
+    setMaskImage(null);
     setRegionPrompts([]);
   };
 
@@ -463,60 +472,30 @@ const App: React.FC = () => {
               <strong className="font-bold">Error: </strong>
               <span className="block sm:inline">{error}</span>
               <button onClick={() => setError(null)} className="absolute top-0 bottom-0 right-0 px-4 py-3" aria-label="Close error message">
-                <svg className="fill-current h-6 w-6 text-red-200" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.029a1.2 1.2 0 1 1-1.697-1.697l2.758-3.15-2.759-3.152a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-3.031a1.2 1.2 0 1 1 1.697 1.697l-2.758 3.152 2.758 3.15a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                <svg className="fill-current h-6 w-6 text-red-200" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.03a1.2 1.2 0 1 1-1.697-1.697L8.303 10 5.652 7.349a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-2.533a1.2 1.2 0 1 1 1.697 1.697L11.697 10l2.651 2.849a1.2 1.2 0 0 1 0 1.697z"/></svg>
               </button>
             </div>
           )}
 
-          {!activeImage ? (
-            <div className="w-full max-w-4xl mx-auto mt-8">
-              <InitialView 
-                onImageUpload={handleImageUpload} 
-                onImageGenerate={handleImageGenerate}
-                isLoading={isLoading}
-                characters={characters}
-                onCharacterUpload={handleCharacterUpload}
-                onAnalyzeCharacters={handleAnalyzeCharacters}
-                onSetCharacterDefinition={handleSetCharacterDefinition}
-                isAnalyzing={isAnalyzing}
-                analyzeCount={toAnalyzeCount}
-                setError={setError}
-              />
-            </div>
-          ) : (
-            <>
-              <div className="w-full max-w-4xl mx-auto relative mb-4 aspect-[16/9] bg-gray-800 rounded-lg overflow-hidden shadow-2xl">
+          {activeImage ? (
+            <div className="w-full max-w-4xl mx-auto">
+              <div className="relative aspect-[16/9] w-full bg-gray-900 rounded-lg overflow-hidden shadow-2xl">
+                <img src={isMasking && compositeImage ? compositeImage : activeImage.base64} alt="Active thumbnail" className="w-full h-full object-contain" />
                 {isLoading && <Spinner message={loadingMessage} />}
-                <img src={activeImage.base64} alt="Current thumbnail" className="w-full h-full object-contain" />
-                <MaskingCanvas
+                <MaskingCanvas 
                   imageSrc={activeImage.base64}
                   isEnabled={isMasking}
                   brushSize={brushSize}
                   onCompositeImageChange={setCompositeImage}
-                  onHistoryChange={(h) => {
-                    setCanUndo(h.canUndo);
-                    setCanRedo(h.canRedo);
-                  }}
+                  onMaskImageChange={setMaskImage}
+                  onHistoryChange={({ canUndo, canRedo }) => { setCanUndo(canUndo); setCanRedo(canRedo); }}
                   onRegionsChange={handleRegionsChange}
                   undoTrigger={undoTrigger}
                   redoTrigger={redoTrigger}
                   clearTrigger={clearTrigger}
                 />
               </div>
-              
-              <div className="w-full max-w-4xl mx-auto mt-2 mb-4">
-                  <button
-                      onClick={() => handleDownloadVersion(activeImage)}
-                      className="w-full bg-green-600 hover:bg-green-500 text-white font-semibold py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2 shadow-lg"
-                  >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                      <span>Download Full Resolution</span>
-                  </button>
-              </div>
-
-              <MaskingToolbar
+              <MaskingToolbar 
                 isMasking={isMasking}
                 onToggleMasking={handleToggleMasking}
                 brushSize={brushSize}
@@ -527,8 +506,7 @@ const App: React.FC = () => {
                 canUndo={canUndo}
                 canRedo={canRedo}
               />
-
-              <EditControls 
+              <EditControls
                 prompt={prompt}
                 setPrompt={setPrompt}
                 regionPrompts={regionPrompts}
@@ -537,105 +515,98 @@ const App: React.FC = () => {
                 isLoading={isLoading}
                 isMasking={isMasking}
               />
+              <SuggestionBox
+                suggestions={textSuggestions}
+                isLoading={isSuggesting}
+                onSelectSuggestion={(suggestion) => setPrompt(suggestion)}
+                selectedSuggestion={prompt}
+              />
+               <VersionHistory
+                  imageSets={imageSets}
+                  activeVersionId={activeVersionId}
+                  onSelectVersion={handleSelectVersion}
+                  onDeleteSet={handleDeleteSet}
+                  onDeleteVersion={handleDeleteVersion}
+                  onDownloadVersion={handleDownloadVersion}
+              />
+            </div>
+          ) : (
+            <InitialView 
+              onImageUpload={handleImageUpload}
+              onImageGenerate={handleImageGenerate}
+              isLoading={isLoading}
+              characters={characters}
+              onCharacterUpload={handleCharacterUpload}
+              onAnalyzeCharacters={handleAnalyzeCharacters}
+              onSetCharacterDefinition={handleSetCharacterDefinition}
+              isAnalyzing={isAnalyzing}
+              analyzeCount={toAnalyzeCount}
+              setError={setError}
+            />
+          )}
+        </div>
 
-              <div className="w-full max-w-4xl mx-auto px-4 mt-6 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">✨ AI Suggestions</h3>
+        <div
+          ref={menuRef}
+          className={`fixed top-0 right-0 h-full bg-gray-900/90 backdrop-blur-md shadow-2xl z-30 transition-transform duration-300 ease-in-out ${isMenuOpen ? 'translate-x-0' : 'translate-x-full'} w-full max-w-md border-l border-gray-700 flex flex-col`}
+        >
+          <div className="p-4 border-b border-gray-700 flex justify-between items-center">
+            <h2 className="text-xl font-semibold text-white">Tools & Characters</h2>
+            <button onClick={() => setIsMenuOpen(false)} className="p-2 rounded-full hover:bg-gray-700" aria-label="Close menu">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-grow overflow-y-auto p-4">
+            {activeImage && (
+              <div className="mb-6">
                 <button
                   onClick={() => handleGenerateSuggestions(activeImage)}
                   disabled={isSuggesting}
-                  className="bg-purple-600 text-white font-semibold px-4 py-1.5 rounded-md transition-colors text-sm hover:bg-purple-500 disabled:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                  className="w-full bg-purple-600 text-white font-semibold px-4 py-2 rounded-md transition-colors hover:bg-purple-500 disabled:bg-gray-600 disabled:opacity-50 flex items-center justify-center space-x-2"
                 >
                   {isSuggesting ? (
                     <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                      <span>Generating...</span>
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                      <span>Suggesting Text Overlays...</span>
                     </>
                   ) : (
-                    <span>Generate 5 Suggestions</span>
+                    <span>Suggest Text Overlays</span>
                   )}
                 </button>
               </div>
-              <SuggestionBox
-                suggestions={textSuggestions}
-                isLoading={false}
-                onSelectSuggestion={setPrompt}
-              />
+            )}
+            
+            <CharacterUploader
+                characters={characters}
+                onUpload={handleCharacterUpload}
+                onSetDefinition={handleSetCharacterDefinition}
+                onAnalyze={handleAnalyzeCharacters}
+                isAnalyzing={isAnalyzing}
+                analyzeCount={toAnalyzeCount}
+            />
 
-              {!showNewVersionGenerator ? (
-                <div className="w-full max-w-4xl mx-auto px-4 mt-6">
-                  <button
-                    onClick={() => setShowNewVersionGenerator(true)}
-                    className="w-full border-2 border-dashed border-gray-600 hover:border-blue-500 hover:text-blue-400 text-gray-400 font-semibold py-3 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-                    </svg>
-                    <span>Generate Next Scene</span>
-                  </button>
+            {activeImage && (
+                <div className="mt-8 border-t border-gray-700 pt-6">
+                    <button
+                        onClick={() => setShowNewVersionGenerator(!showNewVersionGenerator)}
+                        className="w-full text-left text-lg font-semibold text-white p-2 rounded-md hover:bg-gray-800 flex justify-between items-center"
+                    >
+                        Generate Next Scene
+                        <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 transition-transform ${showNewVersionGenerator ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                    </button>
+                    {showNewVersionGenerator && (
+                        <NextSceneGenerator
+                            onSubmit={handleGenerateNextScene}
+                            isLoading={isLoading}
+                            onCancel={() => setShowNewVersionGenerator(false)}
+                        />
+                    )}
                 </div>
-              ) : (
-                <NextSceneGenerator
-                  onSubmit={handleGenerateNextScene}
-                  isLoading={isLoading}
-                  onCancel={() => setShowNewVersionGenerator(false)}
-                />
-              )}
-              
-              <CharacterUploader 
-                 characters={characters}
-                 onUpload={handleCharacterUpload}
-                 onSetDefinition={handleSetCharacterDefinition}
-                 onAnalyze={handleAnalyzeCharacters}
-                 isAnalyzing={isAnalyzing}
-                 analyzeCount={toAnalyzeCount}
-              />
-
-              <VersionHistory 
-                imageSets={imageSets}
-                activeVersionId={activeVersionId}
-                onSelectVersion={handleSelectVersion}
-                onDeleteVersion={handleDeleteVersion}
-                onDeleteSet={handleDeleteSet}
-                onDownloadVersion={handleDownloadVersion}
-              />
-            </>
-          )}
-        </div>
-        
-        <div 
-          ref={menuRef}
-          className={`fixed top-0 right-0 h-full bg-gray-900/95 backdrop-blur-md shadow-2xl transition-transform duration-300 ease-in-out z-30 w-full max-w-md ${isMenuOpen ? 'translate-x-0' : 'translate-x-full'}`}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="menu-title"
-        >
-          <div className="p-6">
-             <div className="flex justify-between items-center mb-6">
-                <h2 id="menu-title" className="text-2xl font-bold text-white">Menu</h2>
-                <button 
-                  onClick={() => setIsMenuOpen(false)} 
-                  className="p-2 rounded-full hover:bg-gray-700"
-                  aria-label="Close menu"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-            <div className="prose prose-invert">
-                <p>Welcome to the Thumbnail AI Editor!</p>
-                <p>
-                    This tool uses Google's Gemini models to help you generate and edit stunning YouTube thumbnails.
-                </p>
-                <h3 className="text-xl font-semibold mt-6">How to Use:</h3>
-                <ol>
-                    <li>Start by generating a new image with a text prompt or uploading your own.</li>
-                    <li>Use the prompt box to describe changes you want. You can change backgrounds, add objects, or modify styles.</li>
-                     <li>For precise edits, enable <strong>Masking Mode</strong> to paint over the exact area you want to change. You can paint multiple regions, which will be numbered. Refer to them in your prompt (e.g., "In region 1..."). Use Ctrl+Z and Ctrl+Y to undo/redo strokes.</li>
-                    <li>(Optional) Define reference characters by uploading an image for AI analysis or writing a definition yourself. Then use tags like <code>[C1]</code> in your prompt to replace people in your thumbnail while keeping their pose.</li>
-                    <li>Each edit creates a new version, allowing you to track your creative process and compare different ideas.</li>
-                </ol>
-            </div>
+            )}
           </div>
         </div>
       </main>

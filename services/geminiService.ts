@@ -3,7 +3,7 @@ import type { GenerateContentResponse } from "@google/genai";
 import { getNextKey, markKeyAsExhausted, getKeys } from './apiKeyManager';
 
 /**
- * A higher-order function that wraps API calls with error handling and retry logic for API keys.
+ * A higher-order function that wraps API calls with robust error handling and automatic retry logic for API keys.
  * @param apiCall A function that performs an API call, receiving an initialized AI client.
  * @returns The result of the apiCall.
  * @throws An error with a user-friendly message if the API call fails after all retries.
@@ -11,32 +11,42 @@ import { getNextKey, markKeyAsExhausted, getKeys } from './apiKeyManager';
 async function withErrorHandling<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
   const totalKeys = getKeys().length;
   if (totalKeys === 0) {
-    throw new Error("No API keys set. Please add a key in the API Key Manager.");
+    // We call handleError but it always throws, so we must return its "never" type.
+    return handleError(new Error("No API keys set. Please add a key in the API Key Manager."));
   }
 
-  // We will try each key at most once in a rotation.
+  let lastError: Error | null = null;
+
   for (let i = 0; i < totalKeys; i++) {
     let key: string | null = null;
     try {
-      key = getNextKey(); // This function throws if all keys are exhausted/on cooldown.
+      key = getNextKey(); // This can throw if all keys are on cooldown.
       const ai = new GoogleGenAI({ apiKey: key });
-      return await apiCall(ai); // If successful, we return and exit.
+      return await apiCall(ai); // Success! Exit the function.
     } catch (error) {
+      lastError = error as Error;
       if (key && error instanceof Error) {
-        const isQuotaError = error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('quota');
+        // Make the quota check more robust and case-insensitive.
+        const isQuotaError =
+          error.message.toLowerCase().includes('quota') ||
+          error.message.includes('429') ||
+          error.message.includes('RESOURCE_EXHAUSTED');
+        
         if (isQuotaError) {
           markKeyAsExhausted(key);
-          // Loop will continue to try the next available key.
+          // Don't throw yet, just continue the loop to try the next key.
           continue;
         }
       }
-      // For any other error (including no keys available), we don't retry. We just handle and throw.
-      handleError(error);
+      // If the error was from getNextKey, or a non-quota API error,
+      // we don't need to try other keys. Break the loop and handle this specific error.
+      break;
     }
   }
-  
-  // If the loop completes, it means every key we tried resulted in a quota error.
-  throw new Error("All available API keys have exceeded their quota. Please wait a minute before trying again.");
+
+  // If we've exited the loop, it means all attempts failed.
+  // We use the last recorded error to decide which final message to show.
+  return handleError(lastError || new Error("An unknown error occurred after trying all API keys."));
 }
 
 
@@ -51,13 +61,14 @@ const handleError = (error: unknown): never => {
     let finalMessage = "An unexpected error occurred while communicating with the Gemini API.";
 
     if (error instanceof Error) {
-        const message = error.message;
-        if (message.includes('API key not valid') || message.includes('API_KEY')) {
+        const message = error.message.toLowerCase(); // Use lowercase for robust checking
+        if (message.includes('api key not valid') || message.includes('api_key')) {
             finalMessage = "An API key is invalid. Please check your keys in the API Key Manager.";
-        } else if (message.includes('quota')) {
-            finalMessage = "An API key has exceeded its quota. The app is attempting to switch to another key.";
+        } else if (message.includes('quota') || message.includes('resource_exhausted')) {
+            // This message is now the fallback if all keys fail.
+            finalMessage = "All available API keys have exceeded their quota. Please add more keys or wait a minute for them to cool down.";
         } else {
-             finalMessage = `An unexpected error occurred: ${message}`;
+             finalMessage = `An unexpected error occurred: ${error.message}`;
         }
     }
     
@@ -104,19 +115,44 @@ export const editImageWithPrompt = async (
   prompt: string,
   characterImages: ImagePart[] = [],
   isMaskingEdit: boolean = false,
+  maskImage: ImagePart | null = null, // New parameter for the mask
 ): Promise<{ newBase64: string; newMimeType: string }> => {
     return withErrorHandling(async (ai: GoogleGenAI) => {
         const imageEditModel = 'gemini-2.5-flash-image-preview';
         const parts: any[] = [];
         let finalPrompt = prompt;
 
-        // The primary image is now either the original or the composite "instructional image".
+        // Add the primary (original) image
         parts.push({
             inlineData: {
                 data: base64DataUrlToPureBase64(imageToEdit.base64),
                 mimeType: imageToEdit.mimeType,
             },
         });
+
+        // If it's a masking edit, add the separate mask image and use the new robust prompt
+        if (isMaskingEdit && maskImage) {
+            parts.push({
+                inlineData: {
+                    data: base64DataUrlToPureBase64(maskImage.base64),
+                    mimeType: maskImage.mimeType,
+                },
+            });
+            finalPrompt = `You are an expert AI photo editor. You have been provided with an original image, a black and white mask image, and a list of numbered tasks. Your job is to perform the edits described in the numbered list below. Apply each edit ONLY to its corresponding white, numbered area on the mask image when applied to the original image.
+
+**RULES:**
+1.  **Strictly Adhere to Mask:** Modify ONLY the areas of the original image that correspond to the white shapes on the mask image. All black areas must remain untouched.
+2.  **Match Regions to Tasks:** The numbers on the mask image correspond to the task numbers in the prompt.
+3.  **Seamless Integration:** Your edits must be photorealistic and blend perfectly with the original image's lighting, shadows, and style.
+4.  **Execute All Tasks:** You must complete every task in the list.
+5.  **Final Output:** The final image you generate must be the fully edited original image. It must NOT contain the mask, overlays, or any numbers.
+
+**--- EDITING TASKS ---**
+${prompt}
+**--- END OF TASKS ---**
+
+Now, generate the final, edited image by following all rules precisely.`;
+        }
         
         characterImages.forEach(charImage => {
             parts.push({
@@ -126,23 +162,6 @@ export const editImageWithPrompt = async (
                 },
             });
         });
-
-        // If it's a masking edit, use the new "Visual Instruction Fusion" prompt.
-        if (isMaskingEdit) {
-            finalPrompt = `You are an expert AI photo editor. The user has provided an image with numbered, semi-transparent red overlays highlighting areas to be edited. Your task is to perform the edits described in the numbered list below, applying each edit ONLY to its corresponding numbered region in the image.
-
-**RULES:**
-1.  **Strictly Adhere to Regions:** Only modify the highlighted areas. All other parts of the image must remain untouched.
-2.  **Seamless Integration:** Your edits must be photorealistic and blend perfectly with the original image's lighting, shadows, and style.
-3.  **Execute All Tasks:** You must complete every task in the list.
-4.  **Final Output:** The final image you generate must NOT contain the red overlays or the numbers. It should only contain the completed, blended edits.
-
-**--- EDITING TASKS ---**
-${prompt}
-**--- END OF TASKS ---**
-
-Now, generate the final, edited image by following all rules precisely.`;
-        }
 
         parts.push({ text: finalPrompt });
 
@@ -234,7 +253,7 @@ export const generateTextOverlaySuggestions = async (
     return await withErrorHandling(async (ai: GoogleGenAI) => {
         const systemInstruction = "You are an expert YouTube thumbnail designer and content strategist. Your goal is to create highly engaging, clickbaity text overlays that maximize click-through rate, inspired by top YouTubers.";
         const userPrompt = `Analyze the provided thumbnail image. Generate 5 distinct suggestions for text overlays. Each suggestion must be a complete, detailed prompt for an AI image editor. Each prompt must specify:
-1.  The exact text to add, in quotes. The text should be short, dramatic, and in all caps (e.g., 'SHE LOST EVERYTHING!', '"YOU'RE DONE, KAREN"').
+1.  The exact text to add, in quotes. The text should be short, dramatic, and in all caps (e.g., 'SHE LOST EVERYTHING!', '"YOU'RE DONE, KAREn"').
 2.  A specific, descriptive position on the image (e.g., 'top right corner', 'above the person on the right', 'centered at the bottom').
 3.  Detailed styling instructions to make the text POP and be extremely prominent and readable. You MUST specify: a thick, bold, condensed sans-serif font (e.g., 'Impact', 'Bebas Neue', 'Anton'); a vibrant, high-contrast text color (e.g., 'bright yellow #FFFF00', 'vibrant red #FF0000'); a very thick, contrasting outline, usually black or white (e.g., 'with a heavy 10px black stroke'); and a subtle drop shadow to make it pop from the background. The final result should look professional and attention-grabbing.
 Return the response as a JSON object with a single key 'suggestions' which is an array of strings, where each string is a complete prompt.`;

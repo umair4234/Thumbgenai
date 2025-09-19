@@ -5,6 +5,7 @@ interface MaskingCanvasProps {
   isEnabled: boolean;
   brushSize: number;
   onCompositeImageChange: (base64: string | null) => void;
+  onMaskImageChange: (base64: string | null) => void; // New callback for the data mask
   onHistoryChange: (history: { canUndo: boolean; canRedo: boolean }) => void;
   onRegionsChange: (regions: { id: number }[]) => void;
   undoTrigger: number;
@@ -58,6 +59,7 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
   isEnabled,
   brushSize,
   onCompositeImageChange,
+  onMaskImageChange,
   onHistoryChange,
   onRegionsChange,
   undoTrigger,
@@ -107,11 +109,14 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
     };
   };
 
-  const drawRegions = useCallback((ctx: CanvasRenderingContext2D, isForDisplay: boolean) => {
-      ctx.strokeStyle = isForDisplay ? 'rgba(239, 68, 68, 0.7)' : 'rgba(239, 68, 68, 0.5)'; // More transparent for composite
+  const drawRegionsOnContext = useCallback((ctx: CanvasRenderingContext2D, color: string, isForMask: boolean) => {
+      ctx.strokeStyle = color;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.lineWidth = brushSize;
+       if (isForMask) {
+           ctx.fillStyle = color;
+       }
       regions.forEach(region => {
           region.paths.forEach(path => {
               if (path.length < 1) return;
@@ -121,11 +126,14 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
                   ctx.lineTo(path[i].x, path[i].y);
               }
               ctx.stroke();
+               if (isForMask) {
+                   ctx.fill(); // Fill the path on the mask
+               }
           });
       });
   }, [regions, brushSize]);
 
-  const drawRegionNumbers = useCallback((ctx: CanvasRenderingContext2D) => {
+  const drawRegionNumbersOnContext = useCallback((ctx: CanvasRenderingContext2D, isForMask: boolean) => {
       const smallerDim = Math.min(ctx.canvas.width, ctx.canvas.height);
       const baseFontSize = Math.max(24, smallerDim * 0.05);
 
@@ -137,12 +145,17 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
           const centerX = region.bbox.minX + (region.bbox.maxX - region.bbox.minX) / 2;
           const centerY = region.bbox.minY + (region.bbox.maxY - region.bbox.minY) / 2;
           
-          ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-          ctx.lineWidth = baseFontSize * 0.15;
-          ctx.strokeText(String(region.id), centerX, centerY);
-          
-          ctx.fillStyle = '#FFFF00'; // Bright yellow for high contrast
-          ctx.fillText(String(region.id), centerX, centerY);
+          if (isForMask) {
+              ctx.fillStyle = '#FFFFFF'; // White text for the mask
+              ctx.fillText(String(region.id), centerX, centerY);
+          } else {
+              ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+              ctx.lineWidth = baseFontSize * 0.15;
+              ctx.strokeText(String(region.id), centerX, centerY);
+              
+              ctx.fillStyle = '#FFFF00'; // Bright yellow for display
+              ctx.fillText(String(region.id), centerX, centerY);
+          }
       });
   }, [regions]);
 
@@ -169,41 +182,49 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     if (!isEnabled) return;
     
-    drawRegions(ctx, true);
+    drawRegionsOnContext(ctx, 'rgba(239, 68, 68, 0.7)', false);
     if (!isDrawing.current) {
-      drawRegionNumbers(ctx);
+      drawRegionNumbersOnContext(ctx, false);
     } else {
       drawCurrentPath(ctx);
     }
-  }, [isEnabled, drawRegions, drawRegionNumbers, drawCurrentPath]);
+  }, [isEnabled, drawRegionsOnContext, drawRegionNumbersOnContext, drawCurrentPath]);
 
-  const generateCompositeImage = useCallback(async () => {
+  const generateOutputImages = useCallback(async () => {
     if (regions.length === 0) {
       onCompositeImageChange(null);
+      onMaskImageChange(null);
       return;
     }
 
     const image = imageRef.current;
     if (!image || !image.complete) return;
 
+    // Create Composite Image for Display
     const compositeCanvas = document.createElement('canvas');
     compositeCanvas.width = image.naturalWidth;
     compositeCanvas.height = image.naturalHeight;
-    const ctx = compositeCanvas.getContext('2d');
-    if (!ctx) return;
+    const compositeCtx = compositeCanvas.getContext('2d');
+    if (compositeCtx) {
+        compositeCtx.drawImage(image, 0, 0);
+        drawRegionsOnContext(compositeCtx, 'rgba(239, 68, 68, 0.5)', false);
+        drawRegionNumbersOnContext(compositeCtx, false);
+        onCompositeImageChange(compositeCanvas.toDataURL('image/png'));
+    }
 
-    // 1. Draw the base image
-    ctx.drawImage(image, 0, 0);
-
-    // 2. Draw the semi-transparent mask overlays
-    drawRegions(ctx, false);
-
-    // 3. Draw the high-contrast numbers
-    drawRegionNumbers(ctx);
-
-    const base64 = compositeCanvas.toDataURL('image/png');
-    onCompositeImageChange(base64);
-  }, [regions, onCompositeImageChange, drawRegions, drawRegionNumbers]);
+    // Create Black and White Mask Image for API
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = image.naturalWidth;
+    maskCanvas.height = image.naturalHeight;
+    const maskCtx = maskCanvas.getContext('2d');
+    if (maskCtx) {
+        maskCtx.fillStyle = '#000000';
+        maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+        drawRegionsOnContext(maskCtx, '#FFFFFF', true);
+        drawRegionNumbersOnContext(maskCtx, true);
+        onMaskImageChange(maskCanvas.toDataURL('image/png'));
+    }
+  }, [regions, onCompositeImageChange, onMaskImageChange, drawRegionsOnContext, drawRegionNumbersOnContext]);
 
   const startDrawing = useCallback((event: MouseEvent | TouchEvent) => {
     if (!isEnabled || (event instanceof MouseEvent && event.button !== 0)) return;
@@ -305,16 +326,16 @@ const MaskingCanvas: React.FC<MaskingCanvasProps> = ({
       canvas.height = img.naturalHeight;
       imageRef.current = img;
       redrawCanvas();
-      generateCompositeImage(); // Generate initial composite in case there are saved regions
+      generateOutputImages(); // Generate initial composite in case there are saved regions
     };
-  }, [imageSrc, redrawCanvas, generateCompositeImage]);
+  }, [imageSrc, redrawCanvas, generateOutputImages]);
 
   useEffect(() => {
     redrawCanvas();
-    generateCompositeImage();
+    generateOutputImages();
     onHistoryChange({ canUndo: historyIndex > 0, canRedo: historyIndex < history.length - 1 });
     onRegionsChange(regions.map(r => ({ id: r.id })));
-  }, [regions, redrawCanvas, generateCompositeImage, onHistoryChange, onRegionsChange, history.length, historyIndex]);
+  }, [regions, redrawCanvas, generateOutputImages, onHistoryChange, onRegionsChange, history.length, historyIndex]);
   
   useEffect(() => {
     if (undoTrigger > 0) setHistoryIndex(i => Math.max(0, i - 1));
