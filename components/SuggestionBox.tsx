@@ -8,24 +8,12 @@ interface SuggestionBoxProps {
 }
 
 const SuggestionBox: React.FC<SuggestionBoxProps> = ({ suggestions, isLoading, onSelectSuggestion, selectedSuggestion }) => {
-  if (isLoading) {
-    return (
-      <div className="w-full max-w-4xl mx-auto px-4 mt-6">
-        <div className="flex items-center space-x-2 text-gray-400">
-           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
-           <span>Generating suggestions...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (suggestions.length === 0) {
+  if (suggestions.length === 0 && !isLoading) {
     return null; // Don't render anything if there are no suggestions and it's not loading
   }
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-4 mt-4">
-      <h3 className="text-sm font-semibold text-gray-400 mb-2 uppercase tracking-wider">✨ AI Suggestions</h3>
+    <div className="w-full max-w-4xl mx-auto px-4 mt-2">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
         {suggestions.map((suggestion, index) => {
           const isSelected = suggestion === selectedSuggestion;

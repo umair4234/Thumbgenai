@@ -6,8 +6,10 @@ interface MaskingToolbarProps {
   brushSize: number;
   onBrushSizeChange: (size: number) => void;
   onUndo: () => void;
+  onRedo: () => void;
   onClear: () => void;
-  hasMask: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const MaskingToolbar: React.FC<MaskingToolbarProps> = ({
@@ -16,8 +18,10 @@ const MaskingToolbar: React.FC<MaskingToolbarProps> = ({
   brushSize,
   onBrushSizeChange,
   onUndo,
+  onRedo,
   onClear,
-  hasMask
+  canUndo,
+  canRedo
 }) => {
   return (
     <div className="w-full max-w-4xl mx-auto px-4 mt-4 mb-2">
@@ -31,7 +35,7 @@ const MaskingToolbar: React.FC<MaskingToolbarProps> = ({
           }`}
           aria-pressed={isMasking}
         >
-          <svg xmlns="http://www.w.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
             <path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" />
             <path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" />
           </svg>
@@ -55,17 +59,27 @@ const MaskingToolbar: React.FC<MaskingToolbarProps> = ({
 
             <button
               onClick={onUndo}
-              disabled={!hasMask}
+              disabled={!canUndo}
               className="p-2 rounded-md hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Undo last stroke"
+              aria-label="Undo last stroke (Ctrl+Z)"
             >
                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M11 15l-3-3m0 0l3-3m-3 3h8M3 12a9 9 0 1118 0 9 9 0 01-18 0z" />
                 </svg>
             </button>
             <button
+              onClick={onRedo}
+              disabled={!canRedo}
+              className="p-2 rounded-md hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              aria-label="Redo last stroke (Ctrl+Y)"
+            >
+               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 15l3-3m0 0l-3-3m3 3H8m11 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+            </button>
+            <button
               onClick={onClear}
-              disabled={!hasMask}
+              disabled={!canUndo}
               className="p-2 rounded-md hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Clear mask"
             >

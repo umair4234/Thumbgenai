@@ -1,27 +1,20 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import type { GenerateContentResponse } from "@google/genai";
-import { getNextKey, markKeyAsExhausted } from './apiKeyManager';
+
+// FIX: Per @google/genai guidelines, initialize the client once with API_KEY from environment variables.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+
 
 /**
- * A higher-order function that wraps API calls with key rotation and error handling logic.
- * It gets the next available key, creates a Gemini client, executes the provided API call,
- * and handles specific errors like rate limiting by marking the key as exhausted.
- * @param apiCall A function that takes a GoogleGenAI client and performs an API call.
+ * A higher-order function that wraps API calls with error handling logic.
+ * @param apiCall A function that performs an API call.
  * @returns The result of the apiCall.
  * @throws An error with a user-friendly message if the API call fails.
  */
-async function withErrorHandling<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): Promise<T> {
-    let usedApiKey: string | null = null;
+async function withErrorHandling<T>(apiCall: () => Promise<T>): Promise<T> {
     try {
-        const apiKey = getNextKey(); // Throws if no valid keys are available
-        usedApiKey = apiKey;
-        const ai = new GoogleGenAI({ apiKey });
-        return await apiCall(ai);
+        return await apiCall();
     } catch (error) {
-        // If the error is a rate limit, mark the key as exhausted for a cooldown period.
-        if (usedApiKey && error instanceof Error && (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('quota'))) {
-            markKeyAsExhausted(usedApiKey);
-        }
         // Propagate a user-friendly error to the UI.
         handleError(error);
     }
@@ -35,19 +28,14 @@ async function withErrorHandling<T>(apiCall: (ai: GoogleGenAI) => Promise<T>): P
 const handleError = (error: unknown): never => {
     console.error("Error calling Gemini API:", error);
 
-    let finalMessage = "An unexpected error occurred. The app will use your next API key for the next request.";
+    let finalMessage = "An unexpected error occurred while communicating with the Gemini API.";
 
     if (error instanceof Error) {
         const message = error.message;
-
-        if (message.includes("No API keys set")) {
-            finalMessage = "No Gemini API key found. Please add one in the API Key Manager (gear icon).";
-        } else if (message.includes("All available API keys")) { // Catches the custom error from getNextKey
-            finalMessage = "All your API keys seem to be rate-limited. Please add a new key or wait a minute before trying again.";
-        } else if (message.includes('API key not valid') || message.includes('API_KEY')) {
-            finalMessage = "The API Key is invalid and will be skipped. The app will try the next available key on your next action. Please check your keys in the manager.";
+        if (message.includes('API key not valid') || message.includes('API_KEY')) {
+            finalMessage = "The Gemini API key is invalid. Please check your environment configuration.";
         } else if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.includes('quota')) {
-            finalMessage = "The current API key has exceeded its quota and has been temporarily paused. The app will automatically use the next available key on your next attempt. If this persists, all your keys may be rate-limited.";
+            finalMessage = "The Gemini API key has exceeded its quota. Please wait a moment before trying again.";
         } else {
              finalMessage = `An unexpected error occurred: ${message}`;
         }
@@ -69,7 +57,7 @@ interface ImagePart {
 export const generateCharacterDefinition = async (
   characterImage: ImagePart
 ): Promise<string> => {
-    return withErrorHandling(async (ai) => {
+    return withErrorHandling(async () => {
         const prompt = "Look at the attached image and write one single short paragraph (max 35 words). Give only physical, repeatable traits for a character reference: approx age, face shape, skin tone, eye color/shape, nose shape, lips, eyebrow shape, hair color/length/style/hairline, facial hair (if any), visible wrinkles/scars, overall body build. Do NOT mention clothing, pose, expression, background, or accessories. If a detail is unclear, write ‘not visible’. Use very simple English and separate traits with commas.";
 
         const imagePart = {
@@ -92,25 +80,24 @@ export const generateCharacterDefinition = async (
 
 
 export const editImageWithPrompt = async (
-  mainImage: ImagePart,
+  imageToEdit: ImagePart,
   prompt: string,
   characterImages: ImagePart[] = [],
-  maskImage: ImagePart | null = null,
+  isMaskingEdit: boolean = false,
 ): Promise<{ newBase64: string; newMimeType: string }> => {
-    return withErrorHandling(async (ai) => {
+    return withErrorHandling(async () => {
         const imageEditModel = 'gemini-2.5-flash-image-preview';
         const parts: any[] = [];
         let finalPrompt = prompt;
 
-        // Add the main image first
+        // The primary image is now either the original or the composite "instructional image".
         parts.push({
             inlineData: {
-                data: base64DataUrlToPureBase64(mainImage.base64),
-                mimeType: mainImage.mimeType,
+                data: base64DataUrlToPureBase64(imageToEdit.base64),
+                mimeType: imageToEdit.mimeType,
             },
         });
         
-        // Add character reference images after the main image
         characterImages.forEach(charImage => {
             parts.push({
                 inlineData: {
@@ -120,21 +107,23 @@ export const editImageWithPrompt = async (
             });
         });
 
-        // If a mask is provided, add it and wrap the prompt with instructions
-        if (maskImage) {
-            parts.push({
-                inlineData: {
-                    data: base64DataUrlToPureBase64(maskImage.base64),
-                    mimeType: maskImage.mimeType,
-                },
-            });
-            finalPrompt = `INSTRUCTION: You are an expert photo editor. You will be provided with a primary image, optional reference character images, a black-and-white mask image, and a user's request. Your task is to apply the user's request ONLY to the white area indicated in the mask image, modifying the primary image. The rest of the primary image (the black area in the mask) must remain completely untouched. When making the edit, it is crucial that you blend the changes seamlessly with the surrounding, unedited areas of the primary image, maintaining consistent lighting, texture, and style.
-            
-User Request: "${prompt}"`;
+        // If it's a masking edit, use the new "Visual Instruction Fusion" prompt.
+        if (isMaskingEdit) {
+            finalPrompt = `You are an expert AI photo editor. The user has provided an image with numbered, semi-transparent red overlays highlighting areas to be edited. Your task is to perform the edits described in the numbered list below, applying each edit ONLY to its corresponding numbered region in the image.
+
+**RULES:**
+1.  **Strictly Adhere to Regions:** Only modify the highlighted areas. All other parts of the image must remain untouched.
+2.  **Seamless Integration:** Your edits must be photorealistic and blend perfectly with the original image's lighting, shadows, and style.
+3.  **Execute All Tasks:** You must complete every task in the list.
+4.  **Final Output:** The final image you generate must NOT contain the red overlays or the numbers. It should only contain the completed, blended edits.
+
+**--- EDITING TASKS ---**
+${prompt}
+**--- END OF TASKS ---**
+
+Now, generate the final, edited image by following all rules precisely.`;
         }
 
-
-        // Add the fully constructed text prompt last
         parts.push({ text: finalPrompt });
 
         const response: GenerateContentResponse = await ai.models.generateContent({
@@ -161,8 +150,7 @@ User Request: "${prompt}"`;
 export const generateImageWithPrompt = async (
   prompt: string
 ): Promise<{ newBase64: string; newMimeType: string }> => {
-    return withErrorHandling(async (ai) => {
-        // This instruction wrapper enhances the user's prompt to achieve a specific cinematic and dramatic style.
+    return withErrorHandling(async () => {
         const finalPrompt = `Generate a photo, hyper-realistic cinematic still. The scene must feel like a dramatic, captured moment from a video, NOT a posed photograph. Characters must have exaggerated, theatrical expressions that immediately grab audience attention. The user's creative request is: "${prompt}", In 16:9 aspect ratio.`;
 
         const response = await ai.models.generateImages({
@@ -223,9 +211,9 @@ export const generateTextOverlaySuggestions = async (
   image: ImagePart
 ): Promise<string[]> => {
   try {
-    return await withErrorHandling(async (ai) => {
+    return await withErrorHandling(async () => {
         const systemInstruction = "You are an expert YouTube thumbnail designer and content strategist. Your goal is to create highly engaging, clickbaity text overlays that maximize click-through rate, inspired by top YouTubers.";
-        const userPrompt = `Analyze the provided thumbnail image. Generate 3 distinct suggestions for text overlays. Each suggestion must be a complete, detailed prompt for an AI image editor. Each prompt must specify:
+        const userPrompt = `Analyze the provided thumbnail image. Generate 5 distinct suggestions for text overlays. Each suggestion must be a complete, detailed prompt for an AI image editor. Each prompt must specify:
 1.  The exact text to add, in quotes. The text should be short, dramatic, and in all caps (e.g., 'SHE LOST EVERYTHING!', '"YOU'RE DONE, KAREN"').
 2.  A specific, descriptive position on the image (e.g., 'top right corner', 'above the person on the right', 'centered at the bottom').
 3.  Detailed styling instructions to make the text POP and be extremely prominent and readable. You MUST specify: a thick, bold, condensed sans-serif font (e.g., 'Impact', 'Bebas Neue', 'Anton'); a vibrant, high-contrast text color (e.g., 'bright yellow #FFFF00', 'vibrant red #FF0000'); a very thick, contrasting outline, usually black or white (e.g., 'with a heavy 10px black stroke'); and a subtle drop shadow to make it pop from the background. The final result should look professional and attention-grabbing.
@@ -253,7 +241,6 @@ Return the response as a JSON object with a single key 'suggestions' which is an
         return parseSuggestions(response.text);
     });
   } catch (error) {
-    // For suggestions, we don't want to show a blocking error, just log it.
     console.error("Error generating text overlay suggestions:", error);
     return [];
   }
@@ -263,9 +250,9 @@ export const generateInitialTextSuggestions = async (
   sceneDescription: string
 ): Promise<string[]> => {
   try {
-    return await withErrorHandling(async (ai) => {
-        const systemInstruction = "You are an expert YouTube thumbnail designer. Based on the user's scene description, your goal is to generate 3 highly engaging, clickbaity text overlay suggestions to maximize click-through rate.";
-        const userPrompt = `Based on the following scene description, generate 3 distinct suggestions for a text overlay to be included in the final image. Each suggestion must be a complete, detailed instruction for an AI.
+    return await withErrorHandling(async () => {
+        const systemInstruction = "You are an expert YouTube thumbnail designer. Based on the user's scene description, your goal is to generate 5 highly engaging, clickbaity text overlay suggestions to maximize click-through rate.";
+        const userPrompt = `Based on the following scene description, generate 5 distinct suggestions for a text overlay to be included in the final image. Each suggestion must be a complete, detailed instruction for an AI.
 Scene: "${sceneDescription}"
 
 Each prompt must specify:
@@ -287,7 +274,6 @@ Return the response as a JSON object with a single key 'suggestions' which is an
         return parseSuggestions(response.text);
     });
   } catch (error) {
-     // For suggestions, we don't want to show a blocking error, just log it.
      console.error("Error generating initial text suggestions:", error);
      return [];
   }

@@ -7,12 +7,10 @@ import VersionHistory from './components/VersionHistory';
 import SuggestionBox from './components/SuggestionBox';
 import Spinner from './components/Spinner';
 import NextSceneGenerator from './components/NextSceneGenerator';
-import ApiKeyManager from './components/ApiKeyManager';
 import MaskingCanvas from './components/MaskingCanvas';
 import MaskingToolbar from './components/MaskingToolbar';
 import { ImageVersion, Character, ImageSet } from './types';
 import { editImageWithPrompt, generateImageWithPrompt, generateCharacterDefinition, generateTextOverlaySuggestions } from './services/geminiService';
-import * as apiKeyManager from './services/apiKeyManager';
 
 const initialCharactersState: Character[] = [
   { id: 'char1', name: 'Character 1', roleName: undefined, base64: null, mimeType: null, definition: null, isLoading: false, isAnalyzed: false },
@@ -33,50 +31,59 @@ const App: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [characters, setCharacters] = useState<Character[]>(initialCharactersState);
   const [showNewVersionGenerator, setShowNewVersionGenerator] = useState(false);
-  const [isApiKeyManagerOpen, setIsApiKeyManagerOpen] = useState(false);
-  const [apiKeys, setApiKeys] = useState<string[]>([]);
   
   // Masking state
   const [isMasking, setIsMasking] = useState(false);
-  const [maskData, setMaskData] = useState<string | null>(null);
+  const [compositeImage, setCompositeImage] = useState<string | null>(null); // For the new visual instruction fusion method
   const [brushSize, setBrushSize] = useState(40);
   const [undoTrigger, setUndoTrigger] = useState(0);
+  const [redoTrigger, setRedoTrigger] = useState(0);
   const [clearTrigger, setClearTrigger] = useState(0);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [regionPrompts, setRegionPrompts] = useState<{ id: number; prompt: string }[]>([]);
+
 
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Load keys from localStorage on initial load
-    setApiKeys(apiKeyManager.getKeys());
-
     const handleClickOutside = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setIsMenuOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isMasking) return;
+      const isCtrl = e.ctrlKey || e.metaKey;
+
+      if (isCtrl && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          setRedoTrigger(c => c + 1); // Ctrl+Shift+Z for redo
+        } else {
+          setUndoTrigger(c => c + 1); // Ctrl+Z for undo
+        }
+      } else if (isCtrl && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        setRedoTrigger(c => c + 1); // Ctrl+Y for redo
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
-
-  const handleAddApiKey = (key: string) => {
-    apiKeyManager.addKey(key);
-    setApiKeys(apiKeyManager.getKeys());
-  };
-
-  const handleDeleteApiKey = (key: string) => {
-    apiKeyManager.deleteKey(key);
-    setApiKeys(apiKeyManager.getKeys());
-  };
+  }, [isMasking]);
 
   const handleGenerateSuggestions = useCallback(async (image: ImageVersion | null) => {
     if (!image) {
-      setTextSuggestions([]);
       return;
     }
     setIsSuggesting(true);
-    setTextSuggestions([]); // Clear old suggestions immediately
+    setTextSuggestions([]);
     setError(null);
     try {
       const suggestions = await generateTextOverlaySuggestions({
@@ -85,8 +92,8 @@ const App: React.FC = () => {
       });
       setTextSuggestions(suggestions);
     } catch (e: any) {
-      // Non-blocking error for suggestions
       console.error("Failed to get suggestions:", e.message);
+      setError("Failed to generate suggestions. The API might be busy.");
       setTextSuggestions([]);
     } finally {
       setIsSuggesting(false);
@@ -103,15 +110,16 @@ const App: React.FC = () => {
     setImageSets(prev => [...prev, newSet]);
     setActiveSetId(newSet.id);
     setActiveVersionId(newVersion.id);
+    setTextSuggestions([]);
     setError(null);
-    await handleGenerateSuggestions(newVersion);
-  }, [imageSets.length, handleGenerateSuggestions]);
+  }, [imageSets.length]);
 
   const handleImageGenerate = async (generationPrompt: string) => {
     if (!generationPrompt.trim()) return;
 
     setIsLoading(true);
     setLoadingMessage('Generating your thumbnail...');
+    setTextSuggestions([]);
     setError(null);
     try {
       const { newBase64, newMimeType } = await generateImageWithPrompt(generationPrompt);
@@ -124,7 +132,6 @@ const App: React.FC = () => {
       setImageSets(prev => [...prev, newSet]);
       setActiveSetId(newSet.id);
       setActiveVersionId(newVersion.id);
-      await handleGenerateSuggestions(newVersion);
     } catch (e: any) {
       setError(e.message || 'An unknown error occurred.');
     } finally {
@@ -176,63 +183,101 @@ const App: React.FC = () => {
     setActiveSetId(setId);
     setActiveVersionId(versionId);
     setShowNewVersionGenerator(false);
-    setIsMasking(false); // Reset masking when changing version
-    setMaskData(null);
-    const set = imageSets.find(s => s.id === setId);
-    const version = set?.versions.find(v => v.id === versionId);
-    handleGenerateSuggestions(version || null);
-  }, [imageSets, handleGenerateSuggestions]);
+    setIsMasking(false);
+    setCompositeImage(null);
+    setRegionPrompts([]);
+    setTextSuggestions([]);
+  }, []);
+
+  const handleRegionsChange = useCallback((regions: { id: number }[]) => {
+    setRegionPrompts(prev => {
+      const newPrompts = regions.map(region => {
+        const existing = prev.find(p => p.id === region.id);
+        return existing || { id: region.id, prompt: '' };
+      });
+      return newPrompts;
+    });
+  }, []);
+
+  const handleRegionPromptChange = (id: number, newPrompt: string) => {
+    setRegionPrompts(prev => prev.map(p => p.id === id ? { ...p, prompt: newPrompt } : p));
+  };
+  
+  const handleToggleMasking = () => {
+    setIsMasking(prev => {
+        if (prev) {
+            setRegionPrompts([]);
+            setCompositeImage(null);
+        }
+        return !prev;
+    });
+  };
 
   const handleSubmitEdit = async () => {
     const activeSet = imageSets.find(s => s.id === activeSetId);
     const currentVersion = activeSet?.versions.find(v => v.id === activeVersionId);
-    if (!currentVersion || !prompt.trim()) return;
-    
-    // Check if masking is enabled but no mask is drawn
-    if (isMasking && !maskData) {
-        setError("Masking is enabled, but nothing has been drawn on the mask. Please draw on the image or disable masking.");
-        return;
-    }
+    if (!currentVersion) return;
 
+    let finalPrompt: string;
+    let imageToSend = currentVersion;
+    let characterImages: { base64: string; mimeType: string; }[] = [];
+
+    if (isMasking) {
+      const validRegionPrompts = regionPrompts.filter(p => p.prompt.trim() !== '');
+      if (validRegionPrompts.length === 0) {
+        setError("Please enter a description for at least one masked region.");
+        return;
+      }
+      if (!compositeImage) {
+        setError("Masking is enabled, but nothing has been drawn. Please draw on the image or disable masking.");
+        return;
+      }
+      imageToSend = { ...currentVersion, base64: compositeImage, mimeType: 'image/png' };
+      finalPrompt = validRegionPrompts
+        .map(p => `- **Region ${p.id}:** ${p.prompt.trim()}`)
+        .join('\n');
+    } else {
+       if (!prompt.trim()) return;
+       finalPrompt = prompt;
+    }
 
     setIsLoading(true);
     setLoadingMessage('Applying your edit...');
     setError(null);
+    
     try {
-      let finalPrompt = prompt;
-      let characterImages: { base64: string; mimeType: string; }[] = [];
-      const usesCharacterTags = /\[C[12]\]/.test(prompt);
+      let submissionPrompt = finalPrompt;
+      const usesCharacterTags = /\[C[12]\]/.test(submissionPrompt);
 
       if (usesCharacterTags) {
         const relevantCharacters = characters.filter(c => 
-          c.base64 && c.isAnalyzed && prompt.includes(`[C${c.id.slice(-1)}]`)
+          c.base64 && c.isAnalyzed && submissionPrompt.includes(`[C${c.id.slice(-1)}]`)
         );
         
         if (relevantCharacters.length > 0) {
             let promptParts = ["The following are character definitions for reference images provided after the main image."];
-            
             relevantCharacters.forEach(char => {
                 promptParts.push(`Definition for [C${char.id.slice(-1)}]: ${char.definition}`);
             });
-            
             characterImages = relevantCharacters.map(char => ({ base64: char.base64!, mimeType: char.mimeType! }));
-
-            promptParts.push(`\nUser request: "${prompt}"`);
+            promptParts.push(`\nUser request: "${submissionPrompt}"`);
             promptParts.push(`\nInstruction: Fulfill the user's request on the primary image. Use the provided character definitions and their corresponding images to replace people when tags like [C1] are mentioned. IMPORTANT: Only change the face and hair to match the reference character. Keep the original pose, clothing, expression, and lighting of the person in the primary image.`);
-            finalPrompt = promptParts.join('\n');
+            submissionPrompt = promptParts.join('\n');
         }
       }
       
-      const isTextOverlayPrompt = /add text overlay|add the text/i.test(prompt);
-      if (isTextOverlayPrompt) {
-        finalPrompt += "\n\nIMPORTANT INSTRUCTION: When adding the text as requested, you MUST ensure it does not cover or obscure the faces or bodies of any people in the image. If necessary, intelligently adjust the image composition, for example by slightly shifting or scaling the subjects or extending the background, to create a clean, non-obtrusive space for the text. The overall scene, characters' expressions, and poses must be preserved.";
+      if (!isMasking) {
+        const isTextOverlayPrompt = /add text overlay|add the text/i.test(submissionPrompt);
+        if (isTextOverlayPrompt) {
+          submissionPrompt += "\n\nIMPORTANT INSTRUCTION: When adding the text as requested, you MUST ensure it does not cover or obscure the faces or bodies of any people in the image. If necessary, intelligently adjust the image composition, for example by slightly shifting or scaling the subjects or extending the background, to create a clean, non-obtrusive space for the text. The overall scene, characters' expressions, and poses must be preserved.";
+        }
       }
 
       const { newBase64, newMimeType } = await editImageWithPrompt(
-        { base64: currentVersion.base64, mimeType: currentVersion.mimeType },
-        finalPrompt,
+        { base64: imageToSend.base64, mimeType: imageToSend.mimeType },
+        submissionPrompt,
         characterImages,
-        isMasking && maskData ? { base64: maskData, mimeType: 'image/png' } : null
+        isMasking
       );
 
       const newVersion: ImageVersion = { id: crypto.randomUUID(), base64: newBase64, mimeType: newMimeType };
@@ -247,9 +292,10 @@ const App: React.FC = () => {
       setImageSets(newImageSets);
       setActiveVersionId(newVersion.id);
       setPrompt('');
-      setIsMasking(false); // Turn off masking after successful edit
-      setMaskData(null);
-      await handleGenerateSuggestions(newVersion);
+      setRegionPrompts([]);
+      setIsMasking(false); 
+      setCompositeImage(null);
+      setTextSuggestions([]);
     } catch (e: any)
     {
       setError(e.message || 'An unknown error occurred.');
@@ -264,6 +310,7 @@ const App: React.FC = () => {
     setIsLoading(true);
     setLoadingMessage('Generating next scene...');
     setError(null);
+    setTextSuggestions([]);
 
     let updatedSets = [...imageSets];
     const currentActiveSetId = activeSetId;
@@ -303,7 +350,6 @@ const App: React.FC = () => {
         setActiveSetId(newSet.id);
         setActiveVersionId(newVersion.id);
         setShowNewVersionGenerator(false);
-        await handleGenerateSuggestions(newVersion);
 
     } catch (e: any) {
         setError(e.message || 'An unknown error occurred.');
@@ -367,7 +413,8 @@ const App: React.FC = () => {
     setCharacters(initialCharactersState);
     setShowNewVersionGenerator(false);
     setIsMasking(false);
-    setMaskData(null);
+    setCompositeImage(null);
+    setRegionPrompts([]);
   };
 
   const activeSet = imageSets.find(s => s.id === activeSetId);
@@ -380,7 +427,6 @@ const App: React.FC = () => {
         onMenuToggle={() => setIsMenuOpen(!isMenuOpen)} 
         onNewThumbnail={handleNewThumbnail}
         showNewButton={!!activeImage}
-        onApiKeyManagerToggle={() => setIsApiKeyManagerOpen(true)}
       />
       <main className="flex-grow pt-20 flex">
         <div className="flex-1 flex flex-col items-center px-4 overflow-y-auto pb-8">
@@ -418,8 +464,14 @@ const App: React.FC = () => {
                   imageSrc={activeImage.base64}
                   isEnabled={isMasking}
                   brushSize={brushSize}
-                  onMaskChange={setMaskData}
+                  onCompositeImageChange={setCompositeImage}
+                  onHistoryChange={(h) => {
+                    setCanUndo(h.canUndo);
+                    setCanRedo(h.canRedo);
+                  }}
+                  onRegionsChange={handleRegionsChange}
                   undoTrigger={undoTrigger}
+                  redoTrigger={redoTrigger}
                   clearTrigger={clearTrigger}
                 />
               </div>
@@ -438,28 +490,46 @@ const App: React.FC = () => {
 
               <MaskingToolbar
                 isMasking={isMasking}
-                onToggleMasking={() => setIsMasking(prev => !prev)}
+                onToggleMasking={handleToggleMasking}
                 brushSize={brushSize}
                 onBrushSizeChange={setBrushSize}
                 onUndo={() => setUndoTrigger(c => c + 1)}
-                onClear={() => {
-                  setClearTrigger(c => c + 1);
-                  setMaskData(null);
-                }}
-                hasMask={!!maskData}
+                onRedo={() => setRedoTrigger(c => c + 1)}
+                onClear={() => setClearTrigger(c => c + 1)}
+                canUndo={canUndo}
+                canRedo={canRedo}
               />
 
               <EditControls 
                 prompt={prompt}
                 setPrompt={setPrompt}
+                regionPrompts={regionPrompts}
+                onRegionPromptChange={handleRegionPromptChange}
                 onSubmit={handleSubmitEdit}
                 isLoading={isLoading}
                 isMasking={isMasking}
               />
 
+              <div className="w-full max-w-4xl mx-auto px-4 mt-6 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">✨ AI Suggestions</h3>
+                <button
+                  onClick={() => handleGenerateSuggestions(activeImage)}
+                  disabled={isSuggesting}
+                  className="bg-purple-600 text-white font-semibold px-4 py-1.5 rounded-md transition-colors text-sm hover:bg-purple-500 disabled:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2"
+                >
+                  {isSuggesting ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      <span>Generating...</span>
+                    </>
+                  ) : (
+                    <span>Generate 5 Suggestions</span>
+                  )}
+                </button>
+              </div>
               <SuggestionBox
                 suggestions={textSuggestions}
-                isLoading={isSuggesting}
+                isLoading={false}
                 onSelectSuggestion={setPrompt}
               />
 
@@ -533,7 +603,7 @@ const App: React.FC = () => {
                 <ol>
                     <li>Start by generating a new image with a text prompt or uploading your own.</li>
                     <li>Use the prompt box to describe changes you want. You can change backgrounds, add objects, or modify styles.</li>
-                     <li>For precise edits, enable <strong>Masking Mode</strong> to paint over the exact area you want to change.</li>
+                     <li>For precise edits, enable <strong>Masking Mode</strong> to paint over the exact area you want to change. You can paint multiple regions, which will be numbered. Refer to them in your prompt (e.g., "In region 1..."). Use Ctrl+Z and Ctrl+Y to undo/redo strokes.</li>
                     <li>(Optional) Define reference characters by uploading an image for AI analysis or writing a definition yourself. Then use tags like <code>[C1]</code> in your prompt to replace people in your thumbnail while keeping their pose.</li>
                     <li>Each edit creates a new version, allowing you to track your creative process and compare different ideas.</li>
                 </ol>
@@ -541,13 +611,6 @@ const App: React.FC = () => {
           </div>
         </div>
       </main>
-      <ApiKeyManager
-        isOpen={isApiKeyManagerOpen}
-        onClose={() => setIsApiKeyManagerOpen(false)}
-        keys={apiKeys}
-        onAddKey={handleAddApiKey}
-        onDeleteKey={handleDeleteApiKey}
-      />
     </div>
   );
 };
